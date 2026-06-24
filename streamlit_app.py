@@ -360,22 +360,40 @@ if st.sidebar.button("Initialize / Rebuild Index"):
             st.sidebar.error(f"Failed to build index: {e}")
             st.sidebar.exception(traceback.format_exc())
 
-# Load index on startup if it exists
-if not st.session_state.get("index_built", False) and os.path.exists(db_path) and groq_key:
+# Build or load index on startup automatically
+if not st.session_state.get("index_built", False) and groq_key:
     try:
-        vs = load_vectorstore(db_path, embedding_model)
-        st.session_state.vectorstore = vs
-        st.session_state.rag_chain, st.session_state.retriever = build_rag_chain(
-            vs, llm_model, retrieval_k, groq_key
-        )
-        st.session_state.index_built = True
-        st.session_state.agent = create_tool_agent(
-            llm_model, [calculator_tool, doc_search_tool], groq_key
-        )
-        st.sidebar.success("Loaded existing FAISS index")
+        if os.path.exists(db_path):
+            vs = load_vectorstore(db_path, embedding_model)
+            st.session_state.vectorstore = vs
+            st.session_state.rag_chain, st.session_state.retriever = build_rag_chain(
+                vs, llm_model, retrieval_k, groq_key
+            )
+            st.session_state.index_built = True
+            st.session_state.agent = create_tool_agent(
+                llm_model, [calculator_tool, doc_search_tool], groq_key
+            )
+            st.sidebar.success("Loaded existing FAISS index")
+        else:
+            # Check if there are PDFs in the folder to build
+            pdf_files = list(Path(docs_path).glob("*.pdf"))
+            if pdf_files:
+                vs, num_chunks = build_vectorstore(docs_path, db_path, chunk_size, chunk_overlap, embedding_model)
+                st.session_state.vectorstore = vs
+                st.session_state.rag_chain, st.session_state.retriever = build_rag_chain(
+                    vs, llm_model, retrieval_k, groq_key
+                )
+                st.session_state.index_built = True
+                st.session_state.agent = create_tool_agent(
+                    llm_model, [calculator_tool, doc_search_tool], groq_key
+                )
+                st.sidebar.success(f"Auto-built index with {num_chunks} chunks")
+            else:
+                st.sidebar.warning("No PDF files found in the specified Docs folder.")
     except Exception as e:
-        st.sidebar.warning("Could not load existing index automatically.")
-        print("Load vectorstore error:", e)
+        st.sidebar.warning(f"Startup index setup failed: {e}")
+        print("Startup index error:", e)
+
 
 # Agent control
 st.sidebar.markdown("---")

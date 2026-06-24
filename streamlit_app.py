@@ -1,10 +1,11 @@
 """
 Zyro Dynamics HR Help Desk - Streamlit App
 Single-file RAG + Agent + Guardrails + Evaluation + LangSmith integration
-Following patterns from learned/streamlit_api_assistant.py
+Following patterns from learned/streamlit_api_assistant.py using ChatGroq and FAISS (Python 3.14 compatible)
 """
 
 import os
+import shutil
 import json
 import traceback
 from pathlib import Path
@@ -19,10 +20,10 @@ warnings.filterwarnings("ignore", message=".*torch.classes.*")
 # -------------------------
 # LangChain + LangGraph imports
 # -------------------------
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.document_loaders import PyPDFDirectoryLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.output_parsers import StrOutputParser
@@ -41,6 +42,7 @@ except Exception:
 # -------------------------
 DEFAULT_CONFIG = {
     "docs_path": "./",
+    "db_path": "faiss_index_store",
     "llm_model": "llama-3.3-70b-versatile",
     "embedding_model": "sentence-transformers/all-MiniLM-L6-v2",
     "chunk_size": 800,
@@ -123,29 +125,34 @@ def load_documents(docs_path):
     return documents
 
 
-def build_vectorstore(docs_path, chunk_size, chunk_overlap, embedding_model):
+def build_vectorstore(docs_path, db_path, chunk_size, chunk_overlap, embedding_model):
     docs = load_documents(docs_path)
     splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
     splits = splitter.split_documents(docs)
     for i, s in enumerate(splits):
         s.metadata["chunk_id"] = i
+    
+    if os.path.exists(db_path):
+        shutil.rmtree(db_path)
+        
     embeddings = HuggingFaceEmbeddings(
         model_name=embedding_model,
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
     vs = FAISS.from_documents(splits, embeddings)
-    vs.save_local("faiss_index")
+    vs.save_local(db_path)
     return vs, len(splits)
 
 
-def load_vectorstore(embedding_model):
+@st.cache_resource
+def load_vectorstore(db_path, embedding_model):
     embeddings = HuggingFaceEmbeddings(
         model_name=embedding_model,
         model_kwargs={"device": "cpu"},
         encode_kwargs={"normalize_embeddings": True}
     )
-    vs = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+    vs = FAISS.load_local(db_path, embeddings, allow_dangerous_deserialization=True)
     return vs
 
 
@@ -297,6 +304,7 @@ def format_context_display(docs):
 st.sidebar.title("System Controls")
 
 docs_path = st.sidebar.text_input("Docs folder", DEFAULT_CONFIG["docs_path"])
+db_path = st.sidebar.text_input("Vector store path", DEFAULT_CONFIG["db_path"])
 llm_model = st.sidebar.text_input("LLM model (Groq)", DEFAULT_CONFIG["llm_model"])
 embedding_model = st.sidebar.text_input("Embedding model", DEFAULT_CONFIG["embedding_model"])
 chunk_size = st.sidebar.number_input("Chunk size", value=DEFAULT_CONFIG["chunk_size"], step=100)
@@ -337,7 +345,7 @@ if st.sidebar.button("Initialize / Rebuild Index"):
     else:
         try:
             with st.spinner("Building vectorstore (this may take a moment)..."):
-                vs, num_chunks = build_vectorstore(docs_path, chunk_size, chunk_overlap, embedding_model)
+                vs, num_chunks = build_vectorstore(docs_path, db_path, chunk_size, chunk_overlap, embedding_model)
                 st.session_state.vectorstore = vs
                 st.session_state.rag_chain, st.session_state.retriever = build_rag_chain(
                     vs, llm_model, retrieval_k, groq_key
@@ -353,9 +361,9 @@ if st.sidebar.button("Initialize / Rebuild Index"):
             st.sidebar.exception(traceback.format_exc())
 
 # Load index on startup if it exists
-if not st.session_state.get("index_built", False) and os.path.exists("faiss_index") and groq_key:
+if not st.session_state.get("index_built", False) and os.path.exists(db_path) and groq_key:
     try:
-        vs = load_vectorstore(embedding_model)
+        vs = load_vectorstore(db_path, embedding_model)
         st.session_state.vectorstore = vs
         st.session_state.rag_chain, st.session_state.retriever = build_rag_chain(
             vs, llm_model, retrieval_k, groq_key
